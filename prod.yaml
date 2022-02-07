@@ -1,0 +1,7 @@
+web:
+  hosts:
+    <Droplet 1 Name>:
+    <Droplet 2 Name>:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa

@@ -1,0 +1,54 @@
+---
+rhel7stig_password_complexity:
+    ucredit: -1
+    lcredit: -1
+    dcredit: -1
+    ocredit: -1
+    difok: 8
+    minclass: 4
+    maxrepeat: 3
+    maxclassrepeat: 4
+    minlen: 15
+
+rhel7stig_login_defaults:
+    encrypt_method: SHA512
+    pass_min_days: 1
+    pass_max_days: 60
+    fail_delay_secs: 4
+    umask: '077'
+    create_home: 'yes'
+
+python2_bin: /bin/python2.7
+
+rhel7stig_unnecessary_accounts:
+    - ftp
+    - games
+
+rhel7stig_remove_unnecessary_user_files: false
+
+rhel7stig_passwd_label: "{{ (this_item | default(item)).id }}: {{ (this_item | default(item)).dir }}"
+
+rhel7stig_av_package:
+    package:
+        - clamav
+        - clamav-scanner-systemd
+        - clamav-server
+        - clamav-data
+        - clamav-update
+        - clamav-filesystem
+        - clamav-devel
+        - clamav-lib
+        - clamav-server-systemd
+    service: clamav-daemon
+
+rhel7stig_service_started: "{{ rhel7stig_system_is_chroot | ternary(omit, 'started') }}"
+rhel7stig_systemd_daemon_reload: "{{ not rhel7stig_system_is_chroot }}"
+rhel7stig_sysctl_reload: "{{ not rhel7stig_system_is_container }}"
+ol7stig_sysctl_reload: "{{ not rhel7stig_system_is_container }}"
+rhel7stig_system_is_chroot: "{{ ansible_is_chroot | default(False) }}"
+rhel7stig_audit_complex: true
+rhel7stig_snmp_community: Endgam3Ladyb0g
+rhel7stig_workaround_for_disa_benchmark: true
+rhel7stig_sudo_timestamp_timeout: 1
+rhel7stig_system_is_container: false
+rhel7stig_maxlogins: 10

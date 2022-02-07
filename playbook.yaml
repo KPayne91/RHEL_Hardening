@@ -1,0 +1,290 @@
+---
+- hosts: localhost
+  vars:
+    digital_ocean_token: <insert token>
+    droplet_size: s-1vcpu-1gb
+    droplet_region: nyc1
+    droplet_image: centos-7-x64
+  tasks:
+
+  - name: "add public ssh key to digitalocean account"
+    digital_ocean_sshkey:
+      name: "Kyle-Payne-2201"
+      oauth_token: "{{ digital_ocean_token }}"
+      ssh_pub_key: "{{lookup('file', '/root/.ssh/id_rsa.pub') }}"
+      state: present
+    register: sshkey_result
+
+  - name: create a new droplet assigning the key
+    digital_ocean_droplet:
+      name: "{{ item }}"
+      oauth_token: "{{ digital_ocean_token }}"
+      size: "{{ droplet_size }}"
+      region: "{{ droplet_region }}"
+      image: "{{ droplet_image }}"
+      wait_timeout: 600
+      unique_name: yes
+      ssh_keys: ["{{ sshkey_result.data.ssh_key.id }}"]
+      state: present
+    with_inventory_hostnames:
+      - web
+    register: droplet_result
+
+  - name: save ip and hostname to local hosts file /etc/hosts
+    become: yes
+    lineinfile:
+      path: /etc/hosts
+      regexp: '.*{{ item.data.droplet.name }}$'
+      line: "{{ item.data.ip_address }}  {{ item.data.droplet.name }}"
+    with_items: "{{ droplet_result.results }}"
+
+  - name: Waiting 30 seconds for VM's to provision
+    pause:
+      seconds: 30
+    tags: [ count ]
+
+- hosts: all
+  become: true
+  vars_files:
+    - vars/default.yaml
+
+  tasks:
+
+    - name: Install pre-requisites
+      yum: name={{ item }} update_cache=yes state=latest
+      loop: [ 'dnf', 'epel-release', 'nano' ]
+
+    - name: "STIG 01/20 | HIGH | RHEL-07-010290 | The Red Hat Enterprise Linux operating system must not have accounts configured with blank or null passwords."
+      replace:
+          dest: "{{ item }}"
+          regexp: 'nullok ?'
+      with_items:
+          - /etc/pam.d/system-auth
+          - /etc/pam.d/password-auth
+      tags: [ one, stigs]
+
+    - name: "STIG 02/20 | HIGH | RHEL-07-010300 | The Red Hat Enterprise Linux operating system must be configured so that the SSH daemon does not allow authentication using an empty password."
+      lineinfile:
+          state: present
+          dest: /etc/ssh/sshd_config
+          regexp: "(?i)^#?PermitEmptyPasswords"
+          line: PermitEmptyPasswords no
+          validate: /usr/sbin/sshd -tf %s
+      tags: [ two, stigs]
+
+    - name: "STIG 03/20 | MEDIUM | RHEL-07-010120 | The Red Hat Enterprise Linux operating system must be configured so that when passwords are changed or new passwords are established, the new password must contain at least one upper-case character."
+      lineinfile:
+          create: yes
+          dest: /etc/security/pwquality.conf
+          regexp: '^#?\s*ucredit'
+          line: "ucredit = {{ rhel7stig_password_complexity.ucredit | default('-1') }}"
+          mode: 0644
+      tags: [ three, stigs ]
+
+    - name: "STIG 04/20 | MEDIUM | RHEL-07-010280 | The Red Hat Enterprise Linux operating system must be configured so that passwords are a minimum of 15 characters in length."
+      lineinfile:
+          create: yes
+          dest: /etc/security/pwquality.conf
+          regexp: '^#?\s*minlen'
+          line: "minlen = {{ rhel7stig_password_complexity.minlen | default('8') }}"
+          mode: 0644
+      tags: [ four, stigs ]
+
+    - name: "STIG 05/20 | MEDIUM | RHEL-07-020240 | The Red Hat Enterprise Linux operating system must define default permissions for all authenticated users in such a way that the user can only read and modify their own files."
+      lineinfile:
+          dest: /etc/login.defs
+          regexp: ^#?UMASK
+          line: "UMASK {{ rhel7stig_login_defaults.umask | default('077') }}"
+      tags: [ five, stigs]
+
+    - name: "STIG 06/20 | MEDIUM | RHEL-07-020260 | The Red Hat Enterprise Linux operating system security patches and updates must be installed and up to date."
+      package:
+          name: '*'
+          state: latest
+      vars:
+          ansible_python_interpreter: "{{ python2_bin }}"
+      tags: [ six, stigs ]
+
+    - name: "STIG 07/20 | MEDIUM | RHEL-07-020270 | AUDIT | The Red Hat Enterprise Linux operating system must not have unnecessary accounts."
+      block:
+          - name: "MEDIUM | RHEL-07-020270 | AUDIT | The Red Hat Enterprise Linux operating system must not have unnecessary accounts."
+            command: "grep '^{{ item }}:' /etc/passwd"
+            check_mode: false
+            failed_when: rhel_07_020270_audit.rc > 1
+            changed_when: rhel_07_020270_audit.rc == 0
+            register: rhel_07_020270_audit
+            with_items:
+                - "{{ rhel7stig_unnecessary_accounts }}"
+
+          - name: "MEDIUM | RHEL-07-020270 | PATCH | The Red Hat Enterprise Linux operating system must not have unnecessary accounts."
+            user:
+                name: "{{ item }}"
+                state: absent
+                remove: "{{ rhel7stig_remove_unnecessary_user_files }}"
+            register: rhel_07_020270_patch
+            with_items:
+                - "{{ rhel7stig_unnecessary_accounts }}"
+
+          - name: "MEDIUM | RHEL-07-020270 | AUDIT | Re-parse /etc/passwd since it changed."
+            include_tasks: parse_etc_passwd.yaml
+      tags: [ seven, stigs ]
+
+    - name: "STIG 08/20 | HIGH | RHEL-07-020000 | PATCH | The Red Hat Enterprise Linux operating system must not have the rsh-server package installed."
+      package:
+          name: rsh-server
+          state: absent
+      vars:
+          ansible_python_interpreter: "{{ python2_bin }}"
+      tags: [ eight, stigs ]
+
+    - name: "STIG 09/20 | HIGH | RHEL-07-020010 | The Red Hat Enterprise Linux operating system must not have the ypserv package installed."
+      package:
+          name: ypserv
+          state: absent
+      vars:
+          ansible_python_interpreter: "{{ python2_bin }}"
+      tags: [ nine, stigs ]
+
+    - name: "STIG 10/20 | HIGH | RHEL-07-020050 | The Red Hat Enterprise Linux operating system must prevent the installation of software, patches, service packs, device drivers, or operating system components from a repository without verification they have been digitally signed using a certificate that is issued by a Certificate Authority (CA) that is recognized and approved by the organization."
+      lineinfile:
+          dest: /etc/yum.conf
+          regexp: ^gpgcheck
+          line: gpgcheck=1
+          insertafter: '\[main\]'
+      tags: [ ten, stigs ]
+
+    - name: "STIG 11/20 | HIGH | RHEL-07-020060 | PATCH | The Red Hat Enterprise Linux operating system must prevent the installation of software, patches, service packs, device drivers, or operating system components of local packages without verification they have been digitally signed using a certificate that is issued by a Certificate Authority (CA) that is recognized and approved by the organization."
+      lineinfile:
+          dest: /etc/yum.conf
+          regexp: ^localpkg_gpgcheck
+          line: localpkg_gpgcheck=1
+          insertafter: '\[main\]'
+      tags: [ eleven, stigs ]
+
+    - name: "STIG 12/20 | HIGH | RHEL-07-020310 | The Red Hat Enterprise Linux operating system must be configured so that the root account must be the only account having unrestricted access to the system."
+      shell: "cat /etc/passwd | awk -F: '($3 == 0 && $1 != \"root\") {i++;print $1 } END {exit i}'"
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      register: rhel_07_020310_audit
+      tags: [ twelve, stigs ]
+
+    - name: "STIG 13/20 | HIGH | RHEL-07-032000 | The Red Hat Enterprise Linux operating system must use a virus scan program."
+      block:
+          - name: "HIGH | RHEL-07-032000 | PATCH | The Red Hat Enterprise Linux operating system must use a virus scan program."
+            package:
+                name: "{{ rhel7stig_av_package.package }}"
+                state: present
+            vars:
+                ansible_python_interpreter: "{{ python2_bin }}"
+
+          - name: "HIGH | RHEL-07-032000 | PATCH | The Red Hat Enterprise Linux operating system must use a virus scan program."
+            service:
+                name: "{{ rhel7stig_av_package.service }}"
+                state: "{{ rhel7stig_service_started }}"
+                enabled: yes
+            failed_when: false
+      tags: [ thirteen, stigs ]
+
+    - name: "STIG 14/20 | MEDIUM | RHEL-07-021100 | The Red Hat Enterprise Linux operating system must have cron logging implemented."
+      lineinfile:
+          path: /etc/rsyslog.conf
+          state: present
+          regexp: '^cron\.\*[ \t]+/var/log/cron$'
+          line: 'cron.*                                                  /var/log/cron'
+          insertafter: '#### RULES ####'
+      failed_when:
+          - result is failed
+          - result.rc != 257
+      register: result
+      tags: [ fourteen, stigs ]
+
+    - name: "STIG 15/20 | MEDIUM | RHEL-07-021300 | The Red Hat Enterprise Linux operating system must disable Kernel core dumps unless needed."
+      block:
+          - name: "MEDIUM | RHEL-07-021300 | PATCH | The Red Hat Enterprise Linux operating system must disable Kernel core dumps unless needed."
+            shell: "systemctl show kdump | grep LoadState | cut -d = -f 2"
+            register: rhel_07_021300_kdump_service_status
+            changed_when: false
+            check_mode: false
+
+          - name: "MEDIUM | RHEL-07-021300 | PATCH | The Red Hat Enterprise Linux operating system must disable Kernel core dumps unless needed."
+            service:
+                name: kdump
+                enabled: no
+                state: stopped
+      tags: [ fifteen, stigs ]
+
+    - name: "STIG 16/20 | MEDIUM | RHEL-07-030000 | The Red Hat Enterprise Linux operating system must be configured so that auditing is configured to produce records containing information to establish what type of events occurred, where the events occurred, the source of the events, and the outcome of the events. These audit records must also identify individual identities of group account users."
+      block:
+          - name: "MEDIUM | RHEL-07-030000 | PATCH | The Red Hat Enterprise Linux operating system must be configured so that auditing is configured to produce records containing information to establish what type of events occurred, where the events occurred, the source of the events, and the outcome of the events. These audit records must also identify individual identities of group account users."
+            package:
+                name: audit
+                state: present
+            vars:
+                ansible_python_interpreter: "{{ python2_bin }}"
+
+          - name: "MEDIUM | RHEL-07-030000 | PATCH | The Red Hat Enterprise Linux operating system must be configured so that auditing is configured to produce records containing information to establish what type of events occurred, where the events occurred, the source of the events, and the outcome of the events. These audit records must also identify individual identities of group account users."
+            service:
+                name: auditd
+                state: "{{ rhel7stig_service_started }}"
+                enabled: yes
+      tags: [ sixteen, stigs ]
+
+    - name: "STIG 17/20 | LOW | RHEL-07-020200 | The Red Hat Enterprise Linux operating system must remove all software components after updated versions have been installed."
+      lineinfile:
+          dest: /etc/yum.conf
+          regexp: ^#?clean_requirements_on_remove
+          line: clean_requirements_on_remove=1
+          insertafter: '\[main\]'
+      tags: [ seventeen, stigs ]
+
+    - name: "STIG 18/20 | MEDIUM | RHEL-07-010343 | The Red Hat Enterprise Linux operating system must require re-authentication when using the sudo command."
+      block:
+          - name: "MEDIUM | RHEL-07-010343 | PATCH | The Red Hat Enterprise Linux operating system must require re-authentication when using the sudo command. | Get files with timeout set"
+            shell: grep -is 'timestamp_timeout' /etc/sudoers /etc/sudoers.d/* | cut -d":" -f1 | uniq | sort
+            changed_when: false
+            failed_when: false
+            register: rhel_07_010343_timeout_files
+
+          - name: "MEDIUM | RHEL-07-010343 | PATCH | The Red Hat Enterprise Linux operating system must require re-authentication when using the sudo command. | Set value if no results"
+            lineinfile:
+                path: /etc/sudoers
+                regexp: 'Defaults timestamp_timeout='
+                line: "Defaults timestamp_timeout={{ rhel7stig_sudo_timestamp_timeout }}"
+                validate: '/usr/sbin/visudo -cf %s'
+            when: rhel_07_010343_timeout_files.stdout | length == 0
+
+          - name: "MEDIUM | RHEL-07-010343 | PATCH | The Red Hat Enterprise Linux operating system must require re-authentication when using the sudo command. | Set value if has results"
+            lineinfile:
+                path: "{{ item }}"
+                regexp: 'Defaults timestamp_timeout='
+                line: "Defaults timestamp_timeout={{ rhel7stig_sudo_timestamp_timeout }}"
+                validate: '/usr/sbin/visudo -cf %s'
+            with_items:
+                - "{{ rhel_07_010343_timeout_files.stdout_lines }}"
+            when: rhel_07_010343_timeout_files.stdout | length > 0
+      tags: [ eighteen, stigs ]
+
+    - name: "STIG 19/20 | MEDIUM | RHEL-07-040740 | The Red Hat Enterprise Linux operating system must not be performing packet forwarding unless the system is a router."
+      sysctl:
+          name: net.ipv4.ip_forward
+          state: present
+          value: '0'
+          reload: "{{ rhel7stig_sysctl_reload }}"
+          ignoreerrors: yes
+      tags: [ nineteen, stigs ]
+
+    - name: "STIG 20/20 | LOW | RHEL-07-040000 | The Red Hat Enterprise Linux operating system must limit the number of concurrent sessions to 10 for all accounts and/or account types."
+      lineinfile:
+          state: present
+          dest: /etc/security/limits.conf
+          insertbefore: '^# End of file'
+          regexp: '^\*.*maxlogins'
+          line: '*               hard    maxlogins       {{ rhel7stig_maxlogins }}'
+      tags: [ twenty, stigs ]
+
+  handlers:
+    - name: Restart SSHD
+      service:
+        name: sshd
+        state: reloaded
